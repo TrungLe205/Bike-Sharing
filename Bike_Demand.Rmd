@@ -1,0 +1,281 @@
+---
+title: "Predicting Bike Demand"
+author: "Trung Le"
+date: "February 16, 2017"
+output: html_document
+---
+
+## Overview
+This is knowledgeable and fun project from Kaggle that requires to forecast the total count of bikes rented.
+The purpose of the assignment is to practice:
+
+- Cleaning and exploring data
+
+- Predicting rented by using: randomForest, rpart, gradient boosting algorithm (XGBoost)
+
+- Applying "caret"" package in to these models and compared result of each model by calculating RMSE
+
+## Data
+Training data set has 12 variables and test data has 9 variables (excluding registered, casual, and count)
+
+Independent Variables
+
+```
+datetime      : hourly date + timestamp  
+season        : 1 = spring, 2 = summer, 3 = fall, 4 = winter 
+holiday       : whether the day is considered a holiday
+workingday    : whether the day is neither a weekend nor holiday
+weather       : 1: Clear, Few clouds, Partly cloudy, Partly cloudy 
+2: Mist + Cloudy, Mist + Broken clouds, Mist + Few clouds, Mist 
+3: Light Snow, Light Rain + Thunderstorm + Scattered clouds, Light Rain + Scattered clouds 
+4: Heavy Rain + Ice Pallets + Thunderstorm + Mist, Snow + Fog 
+temp          : temperature in Celsius
+atemp         : "feels like" temperature in Celsius
+humidity      : relative humidity
+windspeed     : wind speed
+```
+
+Dependent Variables
+
+```
+casual        : number of non-registered user rentals initiated
+registered    : number of registered user rentals initiated
+count         : number of total rentals
+```
+
+## Importing and Exploring data set
+For this assginment, we use all packages as below:
+```{r, eval = TRUE}
+library(caret)
+library(rpart)
+library(randomForest)
+library(dplyr)
+library(caTools)
+library(gbm)
+library(plyr)
+```
+#### Import train and test data set
+
+```{r}
+setwd("~/Documents/DATA SCIENTIST/Bike Sharing/Data")
+train <- read.csv("train.csv")
+test <- read.csv("test.csv")
+```
+#### Combining train and test data into one data called "bike" data
+
+```{r}
+casual <- train$casual
+registered <- train$registered
+count <- train$count
+train <- train[,-c(10:12)]
+bike <- rbind(train,test) 
+```
+Take casual and registered variable out from train data so both data have the same structure
+
+#### Cleaning and Exploring data
+
+Seperate date and time variable
+
+```{r}
+Hours <- format(as.POSIXct(strptime(bike$datetime,"%d/%m/%Y %H:%M:%S",tz="")) ,format = "%H:%M:%S")
+date <- as.POSIXct(bike$datetime)
+df_date <- data.frame(date = date, Year = as.numeric(format(date, format = "%Y")), Month = as.numeric(format(date, format = "%m")), Day = as.numeric(format(date, format = "%d")), Hour = as.numeric(format(date, format = "%H")))
+```
+Create weekday and weekend variable
+
+```{r}
+df_date$weekday <- as.factor(weekdays(df_date$date))
+df_date <- df_date[,2:6]
+bike <- cbind(bike, df_date)
+bike$weekend <- ifelse(bike$weekday == "Saturday" | bike$weekday == "Sunday", "1", "0")
+```
+
+Data structure
+```{r}
+str(bike)
+```
+
+Plot histogram of each variable to understand distribution of the data
+
+```{r}
+par(mfrow=c(4,2))
+par(mar = rep(2, 4))
+bike$season <- as.numeric(bike$season)
+hist(bike$season)
+bike$holiday <- as.numeric(bike$holiday)
+hist(bike$holiday)
+bike$workingday <- as.numeric(bike$workingday)
+hist(bike$workingday)
+hist(bike$temp)
+bike$weather <- as.numeric(bike$weather)
+hist(bike$weather)
+bike$weekend <- as.numeric(bike$weekend)
+hist(bike$weekend)
+hist(bike$humidity)
+```
+
+From histogram charts, we can see:
+
+- Four seasons have equal distribution
+- Huminity, temp, atemp and windspeed have normal distribution
+- Much less people rent bike in light and heavy rain weather
+
+Convert variables
+```{r}
+bike$season <- as.factor(bike$season)
+bike$Hour <- as.factor(bike$Hour)
+bike$holiday <- as.factor(bike$holiday)
+bike$workingday <- as.factor(bike$workingday)
+bike$weather <- as.factor(bike$weather)
+bike$Year <- as.factor(bike$Year)
+bike$Month <- as.factor(bike$Month)
+bike$weekend <- as.factor(bike$weekend)
+```
+
+## Featuering Engineering
+
+We group Hour variable into 4 groups: 0-6, 7-15, 16-19, 20-23
+```{r, eval = TRUE}
+bike$Hour <- as.numeric(bike$Hour)
+hour <- ifelse(bike$Hour < 7, "0-6", ifelse( bike$Hour >= 7 & bike$Hour < 16, "7-15", ifelse(bike$Hour >= 16 & bike$Hour < 20, "16-19", "20-23")))
+bike <- cbind(bike, hour)
+table(bike$hour)
+bike <- bike[,-13]
+bike$hour <- as.factor(bike$hour)
+```
+
+Then, we group Month variable into 3 groups: 1-5, 6-10, 11-12
+```{r, eval = TRUE}
+bike$Month <- as.numeric(bike$Month)
+month <- ifelse(bike$Month < 6, "1-5", ifelse(bike$Month >= 6 & bike$Month < 11, "6-10", "11-12"))
+bike <- cbind(bike, month)
+table(bike$month)
+bike <- bike[,-11]
+bike$month <- as.factor(bike$month)
+```
+
+
+## Building models
+
+#### Prepare data
+We split the data into train and set as begining
+```{r}
+train <- bike[1:10886,]
+test <- bike[10887:17379,]
+train_dat <- cbind(train, casual)
+train_dat <- cbind(train_dat, registered)
+train_dat <- cbind(train_dat, count)
+```
+
+Before submiting, we would like to test the accuracy of the model. To do that, we split the train data set into 2 sets called subTrain and subTest
+
+```{r}
+set.seed(1)
+library(caTools)
+split <- sample.split(train_dat$count, SplitRatio = 0.7)
+subTrain <- subset(train_dat, split == TRUE)
+subTest <- subset(train_dat, split == FALSE)
+```
+
+To be easy, we create formular as below:
+```{r}
+casual <- casual ~ season + holiday + workingday + weather + temp + atemp + humidity + windspeed + Year + Day + weekday + weekend + hour + month
+registered <- registered ~ season + holiday + workingday + weather + temp + atemp + humidity + windspeed + Year + Day + weekday + weekend + hour + month
+```
+
+So, we will predict casual and registered seperately, then we combines the results
+
+#### Simple tree model
+
+First, we build tree model and calculating RMSE
+
+```{r, eval = FALSE}
+casual_rpart <- rpart(casual, data = subTrain)
+casual_pred <- round(predict(casual_rpart, newdata = subTest))
+registered_rpart <- rpart(registered, data = subTrain)
+registered_pred <- round(predict(registered_rpart, newdata = subTest))
+count_rpart <- casual_pred + registered_pred
+```
+
+Calculating RMSE
+```{r, eval = FALSE}
+rmse_rpart <- sqrt(mean((count_rpart - subTest$count)^2))
+rmse_rpart
+```
+
+We build simple tree with "caret" packages
+
+```{r, eval = FALSE}
+set.seed(1)
+fitControl1 <- trainControl(method = "cv", number = 10)
+Grid <- expand.grid(cp = seq(0,0.05,0.005))
+casual_rpartcv <- train(casual, data = subTrain, method = "rpart", trControl = fitControl1, tuneGrid = Grid, metric = "RMSE", maximize = FALSE)
+casual_predcv <- predict(casual_rpartcv, newdata = subTest)
+registered_rpartcv <- train(registered, data = subTrain, method = "rpart", trControl = fitControl1, tuneGrid = Grid, metric = "RMSE", maximize = FALSE)
+registered_predcv <- predict(registered_rpartcv, newdata = subTest)
+count_rpartcv <- round(casual_predcv + registered_predcv)
+```
+
+Calculating RMSE
+
+```{r, eval = FALSE}
+rmse_rpartcv <- sqrt(mean((count_rpartcv - subTest$count)^2))
+rmse_rpartcv
+```
+
+Quite disapointed because using 'caret' package do not improve the result much, RMSE = 115 compared with 113
+
+#### Random Forest Model with 'caret' package
+
+```{r, eval = FALSE}
+set.seed(1)
+fitControl2 <- trainControl(method = "cv", number = 10)
+Grid1 <- expand.grid(mtry = seq(4,16,4))
+
+# predict casual and registered
+casual_rf <- train(casual, data = subTrain, method = "rf", trControl = fitControl2, metric = "RMSE", maximize = FALSE, tuneGrid = Grid1, ntree = 250) 
+casual_rf
+casual_predrf <- predict(casual_rf, newdata = subTest)
+registered_rf <- train(registered, data = subTrain, method = "rf", trControl = fitControl2, metric = "RMSE", maximize = FALSE, tuneGrid = Grid1, ntree = 250)
+registered_rf
+registered_predrf <- predict(registered_rf, newdata = subTest)
+count_rf <- round(casual_predrf + registered_predrf)
+```
+
+Calculating RMSE
+
+```{r, eval = FALSE}
+rmse_rf <- sqrt(mean((count_rf - subTest$count)^2))
+rmse_rfrf
+```
+
+Compared with cart model, random forest do better with RMSE = 100 comapred with 113. The two most important parameter of random forest is mtry and ntree, in the case above, i just tune the mtry parameter cause of the running time of computer.
+
+#### Gradient boosting algorithm model
+
+```{r, eval = FALSE}
+set.seed(1)
+fitControl3 <- trainControl(method = "cv", number = 3)
+Grid3 <- expand.grid(shrinkage = 0.01, interaction.depth = 8, n.minobsinnode = 10, n.trees = 2500)
+
+# predict casual and registered
+casual_gbm <- train(casual ~ season + holiday + workingday + weather + temp + atemp + humidity + windspeed + Year + Day + weekday + weekend + hour + month, data = subTrain, method = "gbm", trControl = fitControl3, metric = "RMSE", maximize = FALSE, tuneGrid = Grid3 )
+casual_gbm
+casual_predgbm <- predict(casual_gbm, newdata = subTest)
+
+registered_gbm <- train(registered ~ season + holiday + workingday + weather + temp + atemp + humidity + windspeed + Year + Day + weekday + weekend + hour + month, data = subTrain, method = "gbm", trControl = fitControl3, metric = "RMSE", maximize = FALSE, tuneGrid = Grid3)
+registered_gbm
+registered_predgbm <- predict(registered_gbm, newdata = subTest)
+
+count_gbm <- casual_predgbm + registered_predgbm
+
+```
+
+Calculating RMSE
+
+```{r, eval = FALSE}
+rmse_gbm <- sqrt(mean((count_gbm - subTest$count)^2))
+rmse_gbm
+```
+
+RMSE = 102 which is not better than random forest model. It is quite disappointed.
